@@ -159,10 +159,11 @@ def process_frame(image_data_b64, session):
         [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in FOREHEAD_CENTRAL],
         dtype=np.int32,
     )
-    import cv2
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, cv2.convexHull(points), 255)
-    roi_pixels = frame[:, :, 1][mask == 255]  # canal verde (RGB)
+    x1, y1 = points[:, 0].min(), points[:, 1].min()
+    x2, y2 = points[:, 0].max(), points[:, 1].max()
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    roi_pixels = frame[y1:y2, x1:x2, 1]  # canal verde (RGB)
 
     if len(roi_pixels) == 0:
         return {"face_detected": True, "samples": len(session["green_signal"])}
