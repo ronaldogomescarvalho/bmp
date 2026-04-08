@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>rPPG HRV Monitor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0f;
+      color: #e8e6e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+      overflow-x: hidden;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin: 12px 0 4px;
+      color: #fff;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 16px;
+    }
+
+    /* ── Câmera ── */
+    .camera-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 380px;
+      aspect-ratio: 3/4;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #111;
+      border: 1px solid #222;
+    }
+
+    #video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1); /* espelho para câmera frontal */
+    }
+
+    #canvas { display: none; }
+
+    /* overlay de status */
+    .cam-status {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .face-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid #333;
+      transition: all 0.3s;
+    }
+    .face-badge.ok   { color: #4ade80; border-color: #4ade80; }
+    .face-badge.fail { color: #f87171; border-color: #f87171; }
+
+    .fps-badge {
+      font-size: 11px;
+      color: #888;
+      background: rgba(0,0,0,0.6);
+      padding: 4px 8px;
+      border-radius: 20px;
+    }
+
+    /* barra de progresso na câmera */
+    .progress-bar-wrap {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+    }
+
+    .progress-track {
+      height: 4px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #a78bfa);
+      border-radius: 4px;
+      width: 0%;
+      transition: width 0.5s;
+    }
+
+    .progress-label {
+      text-align: center;
+      font-size: 11px;
+      color: #aaa;
+      margin-top: 4px;
+    }
+
+    /* ── Métricas ── */
+    .metrics {
+      width: 100%;
+      max-width: 380px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 14px 0;
+    }
+
+    .metric-card {
+      background: #13131a;
+      border: 1px solid #1e1e2e;
+      border-radius: 14px;
+      padding: 14px;
+      text-align: center;
+      transition: border-color 0.4s;
+    }
+
+    .metric-card.active { border-color: #6366f1; }
+
+    .metric-label {
+      font-size: 10px;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1;
+    }
+
+    .metric-unit {
+      font-size: 11px;
+      color: #666;
+      margin-top: 2px;
+    }
+
+    .metric-value.waiting {
+      font-size: 14px;
+      color: #333;
+      font-weight: 400;
+    }
+
+    /* Score card — largura total */
+    .score-card {
+      width: 100%;
+      max-width: 380px;
+      background: #13131a;
+      border: 1px solid #1e1e2e;
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 14px;
+      text-align: center;
+      transition: border-color 0.4s;
+    }
+
+    .score-card.active { border-color: #a78bfa; }
+
+    .score-label {
+      font-size: 10px;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+
+    .score-value {
+      font-size: 52px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .score-value.waiting { font-size: 18px; color: #333; font-weight: 400; }
+
+    .score-desc {
+      font-size: 13px;
+      margin-top: 6px;
+      color: #888;
+    }
+
+    /* cores do score */
+    .score-excellent { color: #4ade80; }
+    .score-good      { color: #60a5fa; }
+    .score-moderate  { color: #fbbf24; }
+    .score-low       { color: #f87171; }
+
+    /* ── Botões ── */
+    .btn-wrap {
+      width: 100%;
+      max-width: 380px;
+      display: flex;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+
+    button {
+      flex: 1;
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.35; cursor: default; }
+
+    #btn-start {
+      background: #6366f1;
+      color: #fff;
+    }
+
+    #btn-reset {
+      background: #1e1e2e;
+      color: #aaa;
+      border: 1px solid #2a2a3e;
+    }
+
+    /* instrução */
+    .tip {
+      font-size: 12px;
+      color: #444;
+      text-align: center;
+      max-width: 320px;
+      line-height: 1.6;
+      margin-bottom: 16px;
+    }
+
+    /* aviso câmera traseira */
+    .cam-toggle {
+      font-size: 12px;
+      color: #555;
+      margin-bottom: 12px;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>🫀 rPPG HRV Monitor</h1>
+  <p class="subtitle">Meça seus batimentos pela câmera</p>
+
+  <div class="camera-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+
+    <div class="cam-status">
+      <span id="face-badge" class="face-badge fail">Sem rosto</span>
+      <span id="fps-badge" class="fps-badge">-- fps</span>
+    </div>
+
+    <div class="progress-bar-wrap">
+      <div class="progress-track">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="progress-label" id="progress-label">Pressione Iniciar</div>
+    </div>
+  </div>
+
+  <p class="cam-toggle" id="cam-toggle">🔄 Alternar câmera (frontal ↔ traseira)</p>
+
+  <div class="metrics">
+    <div class="metric-card" id="card-bpm">
+      <div class="metric-label">Frequência cardíaca</div>
+      <div class="metric-value waiting" id="val-bpm">aguardando</div>
+      <div class="metric-unit">BPM</div>
+    </div>
+    <div class="metric-card" id="card-hrv">
+      <div class="metric-label">HRV — RMSSD</div>
+      <div class="metric-value waiting" id="val-rmssd">aguardando</div>
+      <div class="metric-unit">ms</div>
+    </div>
+  </div>
+
+  <div class="score-card" id="score-card">
+    <div class="score-label">Score de Prontidão</div>
+    <div class="score-value waiting" id="val-score">Precisa de ~15s de dados</div>
+    <div class="score-desc" id="score-desc"></div>
+  </div>
+
+  <div class="btn-wrap">
+    <button id="btn-start">Iniciar</button>
+    <button id="btn-reset" disabled>Resetar</button>
+  </div>
+
+  <p class="tip">
+    Posicione o rosto centralizado, boa iluminação frontal.<br>
+    Fique parado por 45 segundos para melhor resultado.
+  </p>
+
+  <p class="tip" style="color:#2a2a3a; margin-top:8px;">
+    Ferramenta de autoconhecimento — não substitui avaliação médica.
+  </p>
+
+  <script>
+    // ── Configurações ──
+    const CAPTURE_DURATION = 45;       // segundos
+    const FRAME_INTERVAL_MS = 100;     // enviar 10 fps para o servidor
+    const TARGET_WIDTH = 320;
+    const TARGET_HEIGHT = 240;
+
+    // ── Estado ──
+    let socket = null;
+    let stream = null;
+    let capturing = false;
+    let frameTimer = null;
+    let startTime = null;
+    let samplesReceived = 0;
+    let facingMode = "user";           // começa com câmera frontal
+
+    // ── Elementos ──
+    const video      = document.getElementById("video");
+    const canvas     = document.getElementById("canvas");
+    const ctx        = canvas.getContext("2d");
+    const btnStart   = document.getElementById("btn-start");
+    const btnReset   = document.getElementById("btn-reset");
+    const faceBadge  = document.getElementById("face-badge");
+    const fpsBadge   = document.getElementById("fps-badge");
+    const progressFill  = document.getElementById("progress-fill");
+    const progressLabel = document.getElementById("progress-label");
+    const valBpm    = document.getElementById("val-bpm");
+    const valRmssd  = document.getElementById("val-rmssd");
+    const valScore  = document.getElementById("val-score");
+    const scoreDesc = document.getElementById("score-desc");
+    const cardBpm   = document.getElementById("card-bpm");
+    const cardHrv   = document.getElementById("card-hrv");
+    const scoreCard = document.getElementById("score-card");
+    const camToggle = document.getElementById("cam-toggle");
+
+    canvas.width  = TARGET_WIDTH;
+    canvas.height = TARGET_HEIGHT;
+
+    // ── WebSocket ──
+    function connectSocket() {
+      socket = io({ transports: ["websocket"] });
+
+      socket.on("connect", () => console.log("WS conectado"));
+      socket.on("disconnect", () => console.log("WS desconectado"));
+
+      socket.on("result", (data) => {
+        samplesReceived++;
+
+        // Face detectada?
+        if (data.face_detected) {
+          faceBadge.textContent = "Rosto OK ✓";
+          faceBadge.className = "face-badge ok";
+        } else {
+          faceBadge.textContent = "Sem rosto";
+          faceBadge.className = "face-badge fail";
+        }
+
+        // FPS
+        if (data.fps) fpsBadge.textContent = data.fps + " fps";
+
+        // Progresso
+        if (startTime) {
+          const elapsed = (Date.now() - startTime) / 1000;
+          const pct = Math.min(100, (elapsed / CAPTURE_DURATION) * 100);
+          progressFill.style.width = pct + "%";
+          progressLabel.textContent = Math.floor(elapsed) + "s / " + CAPTURE_DURATION + "s";
+
+          if (elapsed >= CAPTURE_DURATION) stopCapture();
+        }
+
+        // BPM
+        if (data.bpm) {
+          valBpm.textContent = data.bpm;
+          valBpm.className = "metric-value";
+          cardBpm.classList.add("active");
+        }
+
+        // RMSSD
+        if (data.rmssd) {
+          valRmssd.textContent = data.rmssd;
+          valRmssd.className = "metric-value";
+          cardHrv.classList.add("active");
+        }
+
+        // Score
+        if (data.score != null) {
+          const s = data.score;
+          valScore.className = "score-value";
+          valScore.textContent = s;
+          scoreCard.classList.add("active");
+
+          if (s >= 75) {
+            valScore.classList.add("score-excellent");
+            scoreDesc.textContent = "Excelente — Pronto para treino intenso";
+          } else if (s >= 50) {
+            valScore.classList.add("score-good");
+            scoreDesc.textContent = "Bom — Treino moderado recomendado";
+          } else if (s >= 30) {
+            valScore.classList.add("score-moderate");
+            scoreDesc.textContent = "Recuperando — Prefira atividade leve";
+          } else {
+            valScore.classList.add("score-low");
+            scoreDesc.textContent = "Descanse — Priorize sono e recuperação";
+          }
+        }
+      });
+    }
+
+    // ── Câmera ──
+    async function startCamera() {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facingMode,
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        });
+        video.srcObject = stream;
+
+        // espelho só para câmera frontal
+        video.style.transform = facingMode === "user" ? "scaleX(-1)" : "scaleX(1)";
+      } catch (err) {
+        alert("Não foi possível acessar a câmera: " + err.message +
+              "\n\nVerifique se o site está em HTTPS e se você permitiu o acesso à câmera.");
+      }
+    }
+
+    camToggle.addEventListener("click", async () => {
+      facingMode = facingMode === "user" ? "environment" : "user";
+      await startCamera();
+    });
+
+    // ── Captura ──
+    function startCapture() {
+      if (!stream) { alert("Câmera não iniciada."); return; }
+      if (!socket || !socket.connected) { alert("Sem conexão com o servidor."); return; }
+
+      capturing = true;
+      startTime = Date.now();
+      samplesReceived = 0;
+
+      socket.emit("reset");
+
+      btnStart.disabled = true;
+      btnReset.disabled = false;
+
+      frameTimer = setInterval(sendFrame, FRAME_INTERVAL_MS);
+    }
+
+    function stopCapture() {
+      capturing = false;
+      clearInterval(frameTimer);
+      btnStart.disabled = false;
+      progressLabel.textContent = "Concluído!";
+    }
+
+    function sendFrame() {
+      if (!capturing) return;
+      ctx.drawImage(video, 0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+      const imageData = canvas.toDataURL("image/jpeg", 0.7);
+      socket.emit("frame", { image: imageData });
+    }
+
+    function resetAll() {
+      stopCapture();
+      startTime = null;
+      samplesReceived = 0;
+
+      if (socket) socket.emit("reset");
+
+      progressFill.style.width = "0%";
+      progressLabel.textContent = "Pressione Iniciar";
+
+      valBpm.textContent   = "aguardando";
+      valBpm.className     = "metric-value waiting";
+      valRmssd.textContent = "aguardando";
+      valRmssd.className   = "metric-value waiting";
+      valScore.textContent = "Precisa de ~15s de dados";
+      valScore.className   = "score-value waiting";
+      scoreDesc.textContent = "";
+
+      cardBpm.classList.remove("active");
+      cardHrv.classList.remove("active");
+      scoreCard.classList.remove("active");
+
+      faceBadge.textContent = "Sem rosto";
+      faceBadge.className   = "face-badge fail";
+
+      btnReset.disabled = true;
+    }
+
+    // ── Eventos ──
+    btnStart.addEventListener("click", startCapture);
+    btnReset.addEventListener("click", resetAll);
+
+    // ── Init ──
+    connectSocket();
+    startCamera();
+  </script>
+</body>
+</html>
