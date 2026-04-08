@@ -267,4 +267,4 @@ def request_sid():
 # MAIN
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=8080, debug=False)
+ socketio.run(app, host="0.0.0.0", port=8080, debug=False, allow_unsafe_werkzeug=True)
