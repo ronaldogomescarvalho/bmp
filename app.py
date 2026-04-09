@@ -61,12 +61,12 @@ face_landmarker = mp_tasks_vision.FaceLandmarker.create_from_options(options)
 sessions = {}
 
 
-def new_session():
+def new_session(method="CHROM"):
     return {
-        "green_signal": [],
+        "rgb_signal": [],
         "timestamps": [],
+        "method": method,
     }
-
 
 # ─────────────────────────────────────────────
 # DSP
