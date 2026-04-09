@@ -19,7 +19,7 @@ from PIL import Image
 import mediapipe as mp
 from mediapipe.tasks import python as mp_tasks_python
 from mediapipe.tasks.python import vision as mp_tasks_vision
-from scipy.signal import butter, sosfilt, sosfiltfilt, find_peaks
+from scipy.signal import butter, sosfiltfilt, find_peaks
 from scipy.fft import fft, fftfreq
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
@@ -43,231 +43,251 @@ sessions={}
 def new_session(method="CHROM"):
     return {"rgb_signal":[],"timestamps":[],"method":method}
 
-def bandpass(sig,fs):
-    nyq=fs/2.0; lo=max(FILTER_LOW_HZ/nyq,0.001); hi=min(FILTER_HIGH_HZ/nyq,0.999)
-    if lo>=hi or len(sig)<15: return sig
-    # sosfiltfilt é mais estável numericamente que filtfilt para sinais biológicos
-    sos=butter(FILTER_ORDER,[lo,hi],btype="band",output="sos")
-    return sosfiltfilt(sos,sig)
+def bandpass(sig, fs):
+    """Filtro Butterworth passa-banda usando sosfiltfilt — mais estável para sinais biológicos."""
+    nyq = fs / 2.0
+    lo = max(FILTER_LOW_HZ / nyq, 0.001)
+    hi = min(FILTER_HIGH_HZ / nyq, 0.999)
+    if lo >= hi or len(sig) < 15:
+        return sig
+    sos = butter(FILTER_ORDER, [lo, hi], btype="band", output="sos")
+    return sosfiltfilt(sos, sig)
 
 def detrend_norm(s):
     x=np.arange(len(s)); s=s-np.polyval(np.polyfit(x,s,1),x)
     sd=np.std(s); return (s-np.mean(s))/sd if sd>1e-9 else s
 
-def best_snr(comps,fs):
-    best,bsig=-1,comps[0]
+def best_snr(comps, fs):
+    best, bsig = -1, comps[0]
     for c in comps:
-        cf=bandpass(c,fs); n=len(cf)
-        yf=np.abs(fft(cf*np.hanning(n)))[:n//2]; xf=fftfreq(n,1.0/fs)[:n//2]
-        ib=(xf>=FILTER_LOW_HZ)&(xf<=FILTER_HIGH_HZ); ob=~ib&(xf>0)
+        cf = bandpass(c, fs); n = len(cf)
+        yf = np.abs(fft(cf * np.hanning(n)))[:n//2]
+        xf = fftfreq(n, 1.0/fs)[:n//2]
+        ib = (xf >= FILTER_LOW_HZ) & (xf <= FILTER_HIGH_HZ)
+        ob = ~ib & (xf > 0)
         if not np.any(ib) or not np.any(ob): continue
-        snr=np.sum(yf[ib]**2)/(np.sum(yf[ob]**2)+1e-9)
-        if snr>best: best,bsig=snr,cf
+        snr = np.sum(yf[ib]**2) / (np.sum(yf[ob]**2) + 1e-9)
+        if snr > best: best, bsig = snr, cf
     return bsig
 
-def estimate_bpm(sig,fs):
-    n=len(sig)
-    if n<2: return None
-    yf=np.abs(fft(sig*np.hanning(n)))[:n//2]; xf=fftfreq(n,1.0/fs)[:n//2]
-    v=(xf>=0.67)&(xf<=3.0)
+def estimate_bpm(sig, fs):
+    """FFT para estimar BPM dominante com correção de harmônico."""
+    n = len(sig)
+    if n < 2: return None
+    yf = np.abs(fft(sig * np.hanning(n)))[:n//2]
+    xf = fftfreq(n, 1.0/fs)[:n//2]
+    # Faixa fisiológica: 40-180 BPM
+    v = (xf >= 0.67) & (xf <= 3.0)
     if not np.any(v): return None
-    yv=yf[v]; xv=xf[v]
-    freq=xv[np.argmax(yv)]; bpm=freq*60.0
-    if bpm>100:
-        hf=freq/2.0; hv=(xf>=hf*0.9)&(xf<=hf*1.1)
-        if np.any(hv) and np.max(yf[hv])>=np.max(yv)*0.4:
-            bpm=bpm/2.0
+    yv = yf[v]; xv = xf[v]
+    freq = xv[np.argmax(yv)]
+    bpm = freq * 60.0
+    # Corrigir harmônico: BPM>100 pode ser o dobro do real
+    if bpm > 100:
+        hf = freq / 2.0
+        hv = (xf >= hf * 0.9) & (xf <= hf * 1.1)
+        if np.any(hv) and np.max(yf[hv]) >= np.max(yv) * 0.4:
+            bpm = bpm / 2.0
     return bpm
 
 def moving_average(sig, window=5):
     """Média móvel para suavizar micro-oscilações antes de detectar picos."""
-    if len(sig) < window:
-        return sig
-    kernel = np.ones(window) / window
-    return np.convolve(sig, kernel, mode='same')
+    if len(sig) < window: return sig
+    return np.convolve(sig, np.ones(window)/window, mode='same')
 
 def compute_hrv(sig, fs):
     """
-    Calcula HRV (RMSSD) com:
-    - Suavização por média móvel antes de detectar picos
-    - Filtro de outliers RR por mediana (±20%)
-    - Validação SQI: rejeita se desvio padrão dos RR for absurdo
+    Calcula HRV (RMSSD) com pipeline robusto:
+    1. Suavização por média móvel
+    2. Detecção de picos com parâmetros ajustados
+    3. Filtro fisiológico absoluto (40-200 BPM)
+    4. Filtro de outliers por mediana (±15%)
+    5. SQI: rejeita std(RR) > 100ms ou RMSSD > 150ms
     """
     if len(sig) < fs * 5:
         return None, None
 
-    # Suavizar sinal para reduzir micro-oscilações da câmera
-    win = max(3, int(fs * 0.1))  # janela de ~100ms
+    # 1. Suavizar para reduzir micro-oscilações da câmera
+    win = max(3, int(fs * 0.1))  # ~100ms
     sig_smooth = moving_average(sig, window=win)
 
+    # 2. Detectar picos com limiar elevado para reduzir falsos positivos
     min_dist = max(int(PEAK_MIN_DISTANCE_SEC * fs), 1)
     peaks, _ = find_peaks(
         sig_smooth,
         distance=min_dist,
         height=np.median(sig_smooth),
-        prominence=np.std(sig_smooth) * 0.5,  # limiar mais alto = menos falsos picos
-        wlen=min(len(sig_smooth), int(fs * 2))  # janela local para prominence
+        prominence=np.std(sig_smooth) * 0.5,
+        wlen=min(len(sig_smooth), int(fs * 2))
     )
     if len(peaks) < 3:
         return None, None
 
-    # Intervalos RR em ms
+    # 3. Intervalos RR em ms + filtro fisiológico absoluto
     rr = np.diff(peaks) / fs * 1000.0
-
-    # Filtro 1: limites fisiológicos absolutos (40-200 BPM)
     rr = rr[(rr >= PEAK_MIN_DISTANCE_SEC * 1000) & (rr <= PEAK_MAX_DISTANCE_SEC * 1000)]
     if len(rr) < 2:
         return None, None
 
-    # Filtro 2: outliers por mediana — remove RR que variem >20% da mediana
+    # 4. Filtro por mediana: remove RR que variem >15% da mediana
     median_rr = np.median(rr)
-    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.20]
+    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.15]
     if len(rr) < 2:
         return None, None
 
-    # SQI — Signal Quality Index: rejeita se desvio padrão dos RR for absurdo
-    # Fisiologicamente, std(RR) raramente passa de 150ms em repouso
-    if np.std(rr) > 150:
+    # 5. SQI: rejeita sinal com variabilidade absurda
+    if np.std(rr) > 100:
         return None, None
 
     rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
 
-    # Sanidade final: RMSSD > 300ms é claramente ruído
-    if rmssd > 300:
+    if rmssd > 150:
         return None, None
 
     return rr.tolist(), rmssd
 
-def readiness_score(bpm,rmssd):
+def readiness_score(bpm, rmssd):
     if bpm is None or rmssd is None: return None
-    bs=50.0 if 55<=bpm<=75 else (max(0,50-(55-bpm)*2.5) if bpm<55 else max(0,50-(bpm-75)*2.0))
-    hs=50.0 if rmssd>=80 else ((rmssd-20)/60.0*50.0 if rmssd>=20 else max(0,rmssd/20.0*10.0))
-    return round(min(100,max(0,bs+hs)),1)
+    bs = 50.0 if 55<=bpm<=75 else (max(0,50-(55-bpm)*2.5) if bpm<55 else max(0,50-(bpm-75)*2.0))
+    hs = 50.0 if rmssd>=80 else ((rmssd-20)/60.0*50.0 if rmssd>=20 else max(0,rmssd/20.0*10.0))
+    return round(min(100, max(0, bs+hs)), 1)
 
 # ── Métodos rPPG ──────────────────────────────────────────────────────────────
 
-def method_GREEN(rgb,fs):
+def method_GREEN(rgb, fs):
     """Verkruysse et al. (2008) Optics Express 16(26):21434."""
-    return bandpass(detrend_norm(rgb[:,1]),fs)
+    return bandpass(detrend_norm(rgb[:,1]), fs)
 
-def method_CHROM(rgb,fs):
+def method_CHROM(rgb, fs):
     """De Haan & Jeanne (2013) IEEE TBME 60(10):2878."""
-    m=np.mean(rgb,axis=0); m=np.where(m==0,1e-6,m)
-    rn,gn,bn=rgb[:,0]/m[0],rgb[:,1]/m[1],rgb[:,2]/m[2]
-    Xs=3*rn-2*gn; Ys=1.5*rn+gn-1.5*bn
-    Xf=bandpass(Xs,fs); Yf=bandpass(Ys,fs)
-    a=np.std(Xf)/(np.std(Yf) if np.std(Yf)>1e-6 else 1.0)
-    return Xf-a*Yf
+    m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
+    rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
+    Xs = 3*rn - 2*gn; Ys = 1.5*rn + gn - 1.5*bn
+    Xf = bandpass(Xs, fs); Yf = bandpass(Ys, fs)
+    a = np.std(Xf) / (np.std(Yf) if np.std(Yf)>1e-6 else 1.0)
+    return Xf - a*Yf
 
-def method_POS(rgb,fs):
+def method_POS(rgb, fs):
     """Wang et al. (2017) IEEE TBME 64(7):1479."""
-    m=np.mean(rgb,axis=0); m=np.where(m==0,1e-6,m)
-    rn,gn,bn=rgb[:,0]/m[0],rgb[:,1]/m[1],rgb[:,2]/m[2]
-    S1=rn-gn; S2=rn+gn-2*bn
-    S1f=bandpass(S1,fs); S2f=bandpass(S2,fs)
-    b=np.std(S1f)/(np.std(S2f) if np.std(S2f)>1e-6 else 1.0)
-    return detrend_norm(S1f+b*S2f)
+    m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
+    rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
+    S1 = rn - gn; S2 = rn + gn - 2*bn
+    S1f = bandpass(S1, fs); S2f = bandpass(S2, fs)
+    b = np.std(S1f) / (np.std(S2f) if np.std(S2f)>1e-6 else 1.0)
+    return detrend_norm(S1f + b*S2f)
 
-def method_ICA(rgb,fs):
+def method_ICA(rgb, fs):
     """Poh et al. (2010) Optics Express 18(10):10762."""
-    C=rgb.T.astype(float); m=np.mean(C,axis=1,keepdims=True); s=np.std(C,axis=1,keepdims=True)
-    s=np.where(s==0,1e-6,s); Cn=(C-m)/s
-    U,S,_=np.linalg.svd(Cn,full_matrices=False); S=np.where(S<1e-6,1e-6,S)
-    Z=(np.diag(1.0/S)@U.T)@Cn
-    return best_snr(Z,fs)
+    C = rgb.T.astype(float)
+    m = np.mean(C, axis=1, keepdims=True); s = np.std(C, axis=1, keepdims=True)
+    s = np.where(s==0, 1e-6, s); Cn = (C-m)/s
+    U, S, _ = np.linalg.svd(Cn, full_matrices=False)
+    S = np.where(S<1e-6, 1e-6, S)
+    Z = (np.diag(1.0/S) @ U.T) @ Cn
+    return best_snr(Z, fs)
 
-def method_PCA(rgb,fs):
+def method_PCA(rgb, fs):
     """Lewandowska et al. (2011) FedCSIS pp.405."""
-    C=rgb.T.astype(float); Cn=C-np.mean(C,axis=1,keepdims=True)
-    _,vecs=np.linalg.eigh(np.cov(Cn)); comps=vecs[:,::-1].T@Cn
-    return best_snr(comps,fs)
+    C = rgb.T.astype(float)
+    Cn = C - np.mean(C, axis=1, keepdims=True)
+    _, vecs = np.linalg.eigh(np.cov(Cn))
+    comps = vecs[:,::-1].T @ Cn
+    return best_snr(comps, fs)
 
-def method_LGI(rgb,fs):
+def method_LGI(rgb, fs):
     """Pilz et al. (2018) CVPRW pp.1254."""
-    m=np.mean(rgb,axis=0); m=np.where(m==0,1e-6,m)
-    rn,gn,bn=rgb[:,0]/m[0],rgb[:,1]/m[1],rgb[:,2]/m[2]
-    U=np.stack([rn,gn,bn],axis=0); n=np.linalg.norm(U,axis=0,keepdims=True)
-    n=np.where(n==0,1e-6,n); Un=U/n; w=np.std(Un,axis=1)
-    return bandpass(detrend_norm(w[0]*Un[0]-w[1]*Un[1]),fs)
+    m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
+    rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
+    U = np.stack([rn, gn, bn], axis=0)
+    n = np.linalg.norm(U, axis=0, keepdims=True); n = np.where(n==0, 1e-6, n)
+    Un = U/n; w = np.std(Un, axis=1)
+    return bandpass(detrend_norm(w[0]*Un[0] - w[1]*Un[1]), fs)
 
-def method_PBV(rgb,fs):
+def method_PBV(rgb, fs):
     """De Haan & Van Leest (2014) Physiol. Meas. 35(9):1913."""
-    pbv=np.array([0.3,0.45,0.25]); pbv/=np.linalg.norm(pbv)
-    C=rgb.T.astype(float); m=np.mean(C,axis=1,keepdims=True); m=np.where(m==0,1e-6,m); Cn=C/m
-    bvp=pbv@Cn; mot=np.linalg.norm(Cn-np.outer(pbv,pbv@Cn),axis=0)
-    mot=np.where(mot==0,1e-6,mot)
-    return bandpass(detrend_norm(bvp/(1.0+mot)),fs)
+    pbv = np.array([0.3, 0.45, 0.25]); pbv /= np.linalg.norm(pbv)
+    C = rgb.T.astype(float)
+    m = np.mean(C, axis=1, keepdims=True); m = np.where(m==0, 1e-6, m); Cn = C/m
+    bvp = pbv @ Cn
+    mot = np.linalg.norm(Cn - np.outer(pbv, pbv@Cn), axis=0)
+    mot = np.where(mot==0, 1e-6, mot)
+    return bandpass(detrend_norm(bvp/(1.0+mot)), fs)
 
-def method_SSR(rgb,fs):
+def method_SSR(rgb, fs):
     """Wang et al. (2015) IEEE TBME 63(9):1974."""
-    N=len(rgb)
-    if N<4: return np.zeros(N)
-    bvp=np.zeros(N); win=min(32,N//2); dc=np.array([1,1,1])/np.sqrt(3)
-    for i in range(win,N):
-        seg=rgb[i-win:i].T.astype(float); m=np.mean(seg,axis=1,keepdims=True)
-        m=np.where(m==0,1e-6,m)
+    N = len(rgb)
+    if N < 4: return np.zeros(N)
+    bvp = np.zeros(N); win = min(32, N//2); dc = np.array([1,1,1])/np.sqrt(3)
+    for i in range(win, N):
+        seg = rgb[i-win:i].T.astype(float)
+        m = np.mean(seg, axis=1, keepdims=True); m = np.where(m==0, 1e-6, m)
         try:
-            U,_,_=np.linalg.svd(seg/m,full_matrices=False)
-            proj=U[:,0]-np.dot(U[:,0],dc)*dc; bvp[i]=np.dot(proj,(seg/m)[:,-1])
+            U, _, _ = np.linalg.svd(seg/m, full_matrices=False)
+            proj = U[:,0] - np.dot(U[:,0], dc)*dc
+            bvp[i] = np.dot(proj, (seg/m)[:,-1])
         except Exception: pass
-    return bandpass(detrend_norm(bvp),fs)
+    return bandpass(detrend_norm(bvp), fs)
 
-def method_OMIT(rgb,fs):
+def method_OMIT(rgb, fs):
     """Alvarez Casado & Bordallo Lopez (2022) arXiv:2202.04101."""
-    C=rgb.T.astype(float); m=np.mean(C,axis=1,keepdims=True); m=np.where(m==0,1e-6,m)
-    Cn=C/m-1.0; U,_,_=np.linalg.svd(Cn,full_matrices=False)
-    md=U[:,0:1]; clean=Cn-md@(md.T@Cn)
-    return bandpass(detrend_norm(np.array([0.7,1.0,0.3])@clean),fs)
+    C = rgb.T.astype(float)
+    m = np.mean(C, axis=1, keepdims=True); m = np.where(m==0, 1e-6, m)
+    Cn = C/m - 1.0
+    U, _, _ = np.linalg.svd(Cn, full_matrices=False)
+    md = U[:,0:1]; clean = Cn - md@(md.T@Cn)
+    return bandpass(detrend_norm(np.array([0.7, 1.0, 0.3]) @ clean), fs)
 
-METHODS={
-    "GREEN":method_GREEN,"CHROM":method_CHROM,"POS":method_POS,
-    "ICA":method_ICA,"PCA":method_PCA,"LGI":method_LGI,
-    "PBV":method_PBV,"SSR":method_SSR,"OMIT":method_OMIT,
+METHODS = {
+    "GREEN": method_GREEN, "CHROM": method_CHROM, "POS": method_POS,
+    "ICA":   method_ICA,   "PCA":   method_PCA,   "LGI": method_LGI,
+    "PBV":   method_PBV,   "SSR":   method_SSR,   "OMIT": method_OMIT,
 }
 
 # ── Processamento de frame ────────────────────────────────────────────────────
-def process_frame(image_data_b64,session):
+def process_frame(image_data_b64, session):
     try:
-        _,encoded=image_data_b64.split(",",1)
-        frame=np.array(Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB"))
-    except Exception as e: return {"error":str(e)}
+        _, encoded = image_data_b64.split(",", 1)
+        frame = np.array(Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB"))
+    except Exception as e:
+        return {"error": str(e)}
 
-    h,w,_=frame.shape
-    mp_img=mp.Image(image_format=mp.ImageFormat.SRGB,data=frame)
-    res=face_landmarker.detect(mp_img)
+    h, w, _ = frame.shape
+    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+    res = face_landmarker.detect(mp_img)
     if not res.face_landmarks:
-        return {"face_detected":False,"samples":len(session["rgb_signal"])}
+        return {"face_detected": False, "samples": len(session["rgb_signal"])}
 
-    lm=res.face_landmarks[0]
-    pts=np.array([[int(lm[i].x*w),int(lm[i].y*h)] for i in FOREHEAD_CENTRAL],dtype=np.int32)
-    x1,y1=max(0,pts[:,0].min()),max(0,pts[:,1].min())
-    x2,y2=min(w,pts[:,0].max()),min(h,pts[:,1].max())
-    roi=frame[y1:y2,x1:x2]
-    if roi.size==0:
-        return {"face_detected":True,"samples":len(session["rgb_signal"])}
+    lm = res.face_landmarks[0]
+    pts = np.array([[int(lm[i].x*w), int(lm[i].y*h)] for i in FOREHEAD_CENTRAL], dtype=np.int32)
+    x1, y1 = max(0, pts[:,0].min()), max(0, pts[:,1].min())
+    x2, y2 = min(w, pts[:,0].max()), min(h, pts[:,1].max())
+    roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return {"face_detected": True, "samples": len(session["rgb_signal"])}
 
     session["rgb_signal"].append([float(np.mean(roi[:,:,c])) for c in range(3)])
     session["timestamps"].append(time.time())
 
-    n=len(session["rgb_signal"]); ts=session["timestamps"]
-    fs=(n-1)/(ts[-1]-ts[0]) if n>=2 and ts[-1]>ts[0] else 30.0
-    result={"face_detected":True,"samples":n,"fps":round(fs,1)}
+    n = len(session["rgb_signal"]); ts = session["timestamps"]
+    fs = (n-1)/(ts[-1]-ts[0]) if n>=2 and ts[-1]>ts[0] else 30.0
+    result = {"face_detected": True, "samples": n, "fps": round(fs, 1)}
 
-    fn=METHODS.get(session.get("method","CHROM"),method_CHROM)
-    rgb=np.array(session["rgb_signal"])
+    fn = METHODS.get(session.get("method", "CHROM"), method_CHROM)
+    rgb = np.array(session["rgb_signal"])
 
-    if n>=MIN_SAMPLES_FOR_BPM:
+    if n >= MIN_SAMPLES_FOR_BPM:
         try:
-            bpm=estimate_bpm(fn(rgb,fs),fs)
-            if bpm and 40<=bpm<=180: result["bpm"]=round(bpm,1)
+            bpm = estimate_bpm(fn(rgb, fs), fs)
+            if bpm and 40 <= bpm <= 180:
+                result["bpm"] = round(bpm, 1)
         except Exception: pass
 
-    if n>=MIN_SAMPLES_FOR_HRV:
+    if n >= MIN_SAMPLES_FOR_HRV:
         try:
-            rr,rmssd=compute_hrv(fn(rgb,fs),fs)
+            rr, rmssd = compute_hrv(fn(rgb, fs), fs)
             if rmssd is not None:
-                result["rmssd"]=round(rmssd,1)
-                result["score"]=readiness_score(result.get("bpm"),rmssd)
+                result["rmssd"] = round(rmssd, 1)
+                result["score"] = readiness_score(result.get("bpm"), rmssd)
         except Exception: pass
 
     return result
@@ -278,25 +298,25 @@ def index(): return render_template("index.html")
 
 @socketio.on("connect")
 def on_connect():
-    sessions[_sid()]=new_session(); emit("connected",{"msg":"ok"})
+    sessions[_sid()] = new_session(); emit("connected", {"msg": "ok"})
 
 @socketio.on("disconnect")
-def on_disconnect(): sessions.pop(_sid(),None)
+def on_disconnect(): sessions.pop(_sid(), None)
 
 @socketio.on("reset")
 def on_reset(data=None):
-    method=data.get("method","CHROM") if isinstance(data,dict) else "CHROM"
-    sessions[_sid()]=new_session(method=method); emit("reset_ok")
+    method = data.get("method", "CHROM") if isinstance(data, dict) else "CHROM"
+    sessions[_sid()] = new_session(method=method); emit("reset_ok")
 
 @socketio.on("frame")
 def on_frame(data):
-    sid=_sid()
-    if sid not in sessions: sessions[sid]=new_session()
-    emit("result",process_frame(data["image"],sessions[sid]))
+    sid = _sid()
+    if sid not in sessions: sessions[sid] = new_session()
+    emit("result", process_frame(data["image"], sessions[sid]))
 
 def _sid():
     from flask import request
     return request.sid
 
-if __name__=="__main__":
-    socketio.run(app,host="0.0.0.0",port=8080,debug=False,allow_unsafe_werkzeug=True)
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=8080, debug=False, allow_unsafe_werkzeug=True)
