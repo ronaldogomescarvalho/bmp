@@ -191,7 +191,7 @@
   </div>
 
   <script>
-    const CAPTURE_DURATION=45, FRAME_INTERVAL_MS=100, TARGET_WIDTH=1280, TARGET_HEIGHT=720;
+    const CAPTURE_DURATION=45, FRAME_INTERVAL_MS=150, TARGET_WIDTH=640, TARGET_HEIGHT=480;
     const METHOD_REFS={
       GREEN:"Canal verde · Verkruysse et al. (2008) Optics Express",
       CHROM:"Crominância · De Haan & Jeanne (2013) IEEE TBME",
@@ -259,7 +259,7 @@
     async function startCamera(){
       if(stream) stream.getTracks().forEach(t=>t.stop());
       try{
-        stream=await navigator.mediaDevices.getUserMedia({video:{facingMode,width:{ideal:1920},height:{ideal:1080}},audio:false});
+        stream=await navigator.mediaDevices.getUserMedia({video:{facingMode,width:{ideal:1280},height:{ideal:720}},audio:false});
         video.srcObject=stream;
         video.style.transform=facingMode==="user"?"scaleX(-1)":"scaleX(1)";
       }catch(err){alert("Câmera: "+err.message);}
@@ -283,7 +283,7 @@
     function sendFrame(){
       if(!capturing) return;
       ctx.drawImage(video,0,0,TARGET_WIDTH,TARGET_HEIGHT);
-      socket.emit("frame",{image:canvas.toDataURL("image/jpeg",0.92)});
+      socket.emit("frame",{image:canvas.toDataURL("image/jpeg",0.85)});
     }
     function resetAll(){
       stopCapture(); startTime=null;
