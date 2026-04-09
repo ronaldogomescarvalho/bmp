@@ -323,8 +323,8 @@
     // ── Configurações ──
     const CAPTURE_DURATION = 45;       // segundos
     const FRAME_INTERVAL_MS = 100;     // enviar 10 fps para o servidor
-    const TARGET_WIDTH = 320;
-    const TARGET_HEIGHT = 240;
+    const TARGET_WIDTH = 1280;
+    const TARGET_HEIGHT = 720;
 
     // ── Estado ──
     let socket = null;
@@ -434,8 +434,8 @@
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: facingMode,
-            width: { ideal: 640 },
-            height: { ideal: 480 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
           audio: false,
         });
