@@ -28,7 +28,7 @@ FILTER_LOW_HZ=0.65; FILTER_HIGH_HZ=4.0; FILTER_ORDER=6
 # Range fisiológico para busca de pico BPM (separado do filtro)
 BPM_SEARCH_LOW_HZ=0.75; BPM_SEARCH_HIGH_HZ=2.5  # 45–150 BPM
 PEAK_MIN_DISTANCE_SEC=0.3; PEAK_MAX_DISTANCE_SEC=1.5
-MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=150; MIN_DURATION_FOR_HRV_SEC=5.0
+MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=600; MIN_DURATION_FOR_HRV_SEC=20.0
 FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
 
 app=Flask(__name__)
@@ -95,44 +95,43 @@ def moving_average(sig, window=5):
 
 def compute_hrv(sig, fs):
     """
-    Calcula HRV (RMSSD) com pipeline robusto:
-    1. Suavização por média móvel
-    2. Detecção de picos com parâmetros ajustados
-    3. Filtro fisiológico absoluto (300-1500ms)
-    4. Filtro de outliers por mediana (±30%)
-    5. RMSSD calculado se restarem ≥2 intervalos
+    Calcula RMSSD seguindo Task Force (1996) e literatura rPPG:
+    - Mínimo 20s de sinal (≥15 batimentos para RMSSD estável)
+    - Suavização ~200ms antes da detecção de picos
+    - Prominence ≥0.5*std para rejeitar falsos picos de câmera
+    - Filtro fisiológico RR: 333–1500ms (40–180 BPM)
+    - Filtro de outliers: ±20% da mediana RR
+    - Mínimo 8 intervalos RR após filtragem
     """
-    # Usa duração real em vez de contagem de amostras (evita falha quando FPS>30)
     duration = len(sig) / fs if fs > 0 else 0
     if duration < MIN_DURATION_FOR_HRV_SEC:
         return None, None
 
-    # 1. Suavizar para reduzir micro-oscilações da câmera (~100ms)
-    win = max(3, int(fs * 0.1))
+    # Suavização ~200ms para reduzir jitter de câmera
+    win = max(3, int(fs * 0.2))
     sig_smooth = moving_average(sig, window=win)
 
-    # 2. Detectar picos
     min_dist = max(int(PEAK_MIN_DISTANCE_SEC * fs), 1)
     peaks, _ = find_peaks(
         sig_smooth,
         distance=min_dist,
         height=np.median(sig_smooth),
-        prominence=np.std(sig_smooth) * 0.3,
+        prominence=np.std(sig_smooth) * 0.5,
         wlen=min(len(sig_smooth), int(fs * 2))
     )
-    if len(peaks) < 3:
+    if len(peaks) < 4:
         return None, None
 
-    # 3. Intervalos RR em ms + filtro fisiológico absoluto
+    # RR em ms: faixa fisiológica 333–1500ms (40–180 BPM)
     rr = np.diff(peaks) / fs * 1000.0
-    rr = rr[(rr >= PEAK_MIN_DISTANCE_SEC * 1000) & (rr <= PEAK_MAX_DISTANCE_SEC * 1000)]
-    if len(rr) < 2:
+    rr = rr[(rr >= 333) & (rr <= 1500)]
+    if len(rr) < 4:
         return None, None
 
-    # 4. Filtro por mediana: remove RR que variem >30% da mediana (tolerante a ruído de câmera)
+    # Filtro por mediana ±20% (Task Force recomenda ±20% para artefatos)
     median_rr = np.median(rr)
-    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.30]
-    if len(rr) < 2:
+    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.20]
+    if len(rr) < 8:
         return None, None
 
     rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
