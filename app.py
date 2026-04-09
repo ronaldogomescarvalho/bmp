@@ -31,7 +31,7 @@ FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
 
 app=Flask(__name__)
 app.config["SECRET_KEY"]=os.environ.get("SECRET_KEY","rppg-secret-2024")
-socketio=SocketIO(app,cors_allowed_origins="*",async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 MODEL_PATH=os.path.join(os.path.dirname(os.path.abspath(__file__)),"face_landmarker.task")
 base_options=mp_tasks_python.BaseOptions(model_asset_path=MODEL_PATH)
