@@ -26,7 +26,7 @@ from flask_socketio import SocketIO, emit
 
 FILTER_LOW_HZ=0.7; FILTER_HIGH_HZ=3.5; FILTER_ORDER=3
 PEAK_MIN_DISTANCE_SEC=0.3; PEAK_MAX_DISTANCE_SEC=1.5
-MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=150
+MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=150; MIN_DURATION_FOR_HRV_SEC=5.0
 FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
 
 app=Flask(__name__)
@@ -100,24 +100,26 @@ def compute_hrv(sig, fs):
     Calcula HRV (RMSSD) com pipeline robusto:
     1. Suavização por média móvel
     2. Detecção de picos com parâmetros ajustados
-    3. Filtro fisiológico absoluto (40-200 BPM)
-    4. Filtro de outliers por mediana (±15%)
-    5. SQI: rejeita std(RR) > 100ms ou RMSSD > 150ms
+    3. Filtro fisiológico absoluto (300-1500ms)
+    4. Filtro de outliers por mediana (±30%)
+    5. RMSSD calculado se restarem ≥2 intervalos
     """
-    if len(sig) < fs * 5:
+    # Usa duração real em vez de contagem de amostras (evita falha quando FPS>30)
+    duration = len(sig) / fs if fs > 0 else 0
+    if duration < MIN_DURATION_FOR_HRV_SEC:
         return None, None
 
-    # 1. Suavizar para reduzir micro-oscilações da câmera
-    win = max(3, int(fs * 0.1))  # ~100ms
+    # 1. Suavizar para reduzir micro-oscilações da câmera (~100ms)
+    win = max(3, int(fs * 0.1))
     sig_smooth = moving_average(sig, window=win)
 
-    # 2. Detectar picos com limiar elevado para reduzir falsos positivos
+    # 2. Detectar picos
     min_dist = max(int(PEAK_MIN_DISTANCE_SEC * fs), 1)
     peaks, _ = find_peaks(
         sig_smooth,
         distance=min_dist,
         height=np.median(sig_smooth),
-        prominence=np.std(sig_smooth) * 0.5,
+        prominence=np.std(sig_smooth) * 0.3,
         wlen=min(len(sig_smooth), int(fs * 2))
     )
     if len(peaks) < 3:
@@ -129,21 +131,13 @@ def compute_hrv(sig, fs):
     if len(rr) < 2:
         return None, None
 
-    # 4. Filtro por mediana: remove RR que variem >15% da mediana
+    # 4. Filtro por mediana: remove RR que variem >30% da mediana (tolerante a ruído de câmera)
     median_rr = np.median(rr)
-    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.15]
+    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.30]
     if len(rr) < 2:
         return None, None
 
-    # 5. SQI: rejeita sinal com variabilidade absurda
-    if np.std(rr) > 100:
-        return None, None
-
     rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
-
-    if rmssd > 150:
-        return None, None
-
     return rr.tolist(), rmssd
 
 def readiness_score(bpm, rmssd):
