@@ -37,7 +37,8 @@ FOREHEAD_CENTRAL = [10, 67, 109, 108, 151, 337, 338, 297]
 # ─────────────────────────────────────────────
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "rppg-secret-2024")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
 
 # ─────────────────────────────────────────────
 # MEDIAPIPE — carrega o modelo uma vez só
@@ -253,8 +254,9 @@ def on_disconnect():
 
 
 @socketio.on("reset")
-def on_reset():
-    sessions[request_sid()] = new_session()
+def on_reset(data=None):
+    method = data.get("method", "CHROM") if isinstance(data, dict) else "CHROM"
+    sessions[_sid()] = new_session(method=method)
     emit("reset_ok")
 
 
