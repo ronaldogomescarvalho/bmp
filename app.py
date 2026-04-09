@@ -19,12 +19,12 @@ from PIL import Image
 import mediapipe as mp
 from mediapipe.tasks import python as mp_tasks_python
 from mediapipe.tasks.python import vision as mp_tasks_vision
-from scipy.signal import butter, sosfiltfilt, find_peaks
-from scipy.fft import fft, fftfreq
+from scipy.signal import butter, sosfiltfilt, find_peaks, welch
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 
-FILTER_LOW_HZ=0.7; FILTER_HIGH_HZ=3.5; FILTER_ORDER=3
+# Parâmetros alinhados com pyVHR (phuselab/pyVHR)
+FILTER_LOW_HZ=0.65; FILTER_HIGH_HZ=4.0; FILTER_ORDER=6
 PEAK_MIN_DISTANCE_SEC=0.3; PEAK_MAX_DISTANCE_SEC=1.5
 MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=150; MIN_DURATION_FOR_HRV_SEC=5.0
 FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
@@ -58,37 +58,33 @@ def detrend_norm(s):
     sd=np.std(s); return (s-np.mean(s))/sd if sd>1e-9 else s
 
 def best_snr(comps, fs):
+    """Seleciona componente com maior SNR na banda fisiológica (usando Welch PSD)."""
     best, bsig = -1, comps[0]
     for c in comps:
-        cf = bandpass(c, fs); n = len(cf)
-        yf = np.abs(fft(cf * np.hanning(n)))[:n//2]
-        xf = fftfreq(n, 1.0/fs)[:n//2]
-        ib = (xf >= FILTER_LOW_HZ) & (xf <= FILTER_HIGH_HZ)
-        ob = ~ib & (xf > 0)
+        cf = bandpass(c, fs)
+        n = len(cf)
+        nperseg = min(256, n)
+        freqs, psd = welch(cf, fs=fs, nperseg=nperseg, noverlap=min(int(nperseg*0.8), nperseg-1), nfft=2048)
+        ib = (freqs >= FILTER_LOW_HZ) & (freqs <= FILTER_HIGH_HZ)
+        ob = ~ib & (freqs > 0)
         if not np.any(ib) or not np.any(ob): continue
-        snr = np.sum(yf[ib]**2) / (np.sum(yf[ob]**2) + 1e-9)
+        snr = np.sum(psd[ib]) / (np.sum(psd[ob]) + 1e-9)
         if snr > best: best, bsig = snr, cf
     return bsig
 
 def estimate_bpm(sig, fs):
-    """FFT para estimar BPM dominante com correção de harmônico."""
+    """Welch PSD para estimar BPM dominante — alinhado com pyVHR Welch().
+    Mais robusto que FFT simples: reduz ruído espectral e falsos picos."""
     n = len(sig)
     if n < 2: return None
-    yf = np.abs(fft(sig * np.hanning(n)))[:n//2]
-    xf = fftfreq(n, 1.0/fs)[:n//2]
-    # Faixa fisiológica: 40-180 BPM
-    v = (xf >= 0.67) & (xf <= 3.0)
-    if not np.any(v): return None
-    yv = yf[v]; xv = xf[v]
-    freq = xv[np.argmax(yv)]
-    bpm = freq * 60.0
-    # Corrigir harmônico: BPM>100 pode ser o dobro do real
-    if bpm > 100:
-        hf = freq / 2.0
-        hv = (xf >= hf * 0.9) & (xf <= hf * 1.1)
-        if np.any(hv) and np.max(yf[hv]) >= np.max(yv) * 0.4:
-            bpm = bpm / 2.0
-    return bpm
+    nfft = 2048
+    nperseg = min(256, n)
+    noverlap = min(int(nperseg * 0.8), nperseg - 1)
+    freqs, psd = welch(sig, fs=fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
+    mask = (freqs >= FILTER_LOW_HZ) & (freqs <= FILTER_HIGH_HZ)
+    if not np.any(mask): return None
+    peak_freq = freqs[mask][np.argmax(psd[mask])]
+    return peak_freq * 60.0
 
 def moving_average(sig, window=5):
     """Média móvel para suavizar micro-oscilações antes de detectar picos."""
@@ -153,22 +149,24 @@ def method_GREEN(rgb, fs):
     return bandpass(detrend_norm(rgb[:,1]), fs)
 
 def method_CHROM(rgb, fs):
-    """De Haan & Jeanne (2013) IEEE TBME 60(10):2878."""
+    """De Haan & Jeanne (2013) IEEE TBME 60(10):2878.
+    Implementação alinhada com pyVHR: alpha calculado do sinal bruto,
+    bandpass aplicado apenas no BVP combinado final."""
     m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
     rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
     Xs = 3*rn - 2*gn; Ys = 1.5*rn + gn - 1.5*bn
-    Xf = bandpass(Xs, fs); Yf = bandpass(Ys, fs)
-    a = np.std(Xf) / (np.std(Yf) if np.std(Yf)>1e-6 else 1.0)
-    return Xf - a*Yf
+    # alpha do sinal bruto (como pyVHR cpu_CHROM)
+    a = np.std(Xs) / (np.std(Ys) if np.std(Ys)>1e-6 else 1.0)
+    return bandpass(Xs - a*Ys, fs)
 
 def method_POS(rgb, fs):
     """Wang et al. (2017) IEEE TBME 64(7):1479."""
     m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
     rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
     S1 = rn - gn; S2 = rn + gn - 2*bn
-    S1f = bandpass(S1, fs); S2f = bandpass(S2, fs)
-    b = np.std(S1f) / (np.std(S2f) if np.std(S2f)>1e-6 else 1.0)
-    return detrend_norm(S1f + b*S2f)
+    # beta do sinal bruto, bandpass no BVP final
+    b = np.std(S1) / (np.std(S2) if np.std(S2)>1e-6 else 1.0)
+    return bandpass(detrend_norm(S1 + b*S2), fs)
 
 def method_ICA(rgb, fs):
     """Poh et al. (2010) Optics Express 18(10):10762."""
