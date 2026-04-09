@@ -28,7 +28,7 @@ FILTER_LOW_HZ=0.65; FILTER_HIGH_HZ=4.0; FILTER_ORDER=6
 # Range fisiológico para busca de pico BPM (separado do filtro)
 BPM_SEARCH_LOW_HZ=0.75; BPM_SEARCH_HIGH_HZ=2.5  # 45–150 BPM
 PEAK_MIN_DISTANCE_SEC=0.3; PEAK_MAX_DISTANCE_SEC=1.5
-MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=600; MIN_DURATION_FOR_HRV_SEC=20.0
+MIN_SAMPLES_FOR_BPM=15; MIN_SAMPLES_FOR_HRV=100; MIN_DURATION_FOR_HRV_SEC=15.0
 FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
 
 app=Flask(__name__)
@@ -131,7 +131,7 @@ def compute_hrv(sig, fs):
     # Filtro por mediana ±20% (Task Force recomenda ±20% para artefatos)
     median_rr = np.median(rr)
     rr = rr[np.abs(rr - median_rr) <= median_rr * 0.20]
-    if len(rr) < 8:
+    if len(rr) < 5:
         return None, None
 
     rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
