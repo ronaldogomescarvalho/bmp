@@ -25,6 +25,8 @@ from flask_socketio import SocketIO, emit
 
 # Parâmetros alinhados com pyVHR (phuselab/pyVHR)
 FILTER_LOW_HZ=0.65; FILTER_HIGH_HZ=4.0; FILTER_ORDER=6
+# Range fisiológico para busca de pico BPM (separado do filtro)
+BPM_SEARCH_LOW_HZ=0.75; BPM_SEARCH_HIGH_HZ=2.5  # 45–150 BPM
 PEAK_MIN_DISTANCE_SEC=0.3; PEAK_MAX_DISTANCE_SEC=1.5
 MIN_SAMPLES_FOR_BPM=60; MIN_SAMPLES_FOR_HRV=150; MIN_DURATION_FOR_HRV_SEC=5.0
 FOREHEAD_CENTRAL=[10,67,109,108,151,337,338,297]
@@ -74,14 +76,14 @@ def best_snr(comps, fs):
 
 def estimate_bpm(sig, fs):
     """Welch PSD para estimar BPM dominante — alinhado com pyVHR Welch().
-    Mais robusto que FFT simples: reduz ruído espectral e falsos picos."""
+    Busca de pico restrita a 45–150 BPM para evitar ruído de movimento/respiração."""
     n = len(sig)
     if n < 2: return None
     nfft = 2048
     nperseg = min(256, n)
     noverlap = min(int(nperseg * 0.8), nperseg - 1)
     freqs, psd = welch(sig, fs=fs, nperseg=nperseg, noverlap=noverlap, nfft=nfft)
-    mask = (freqs >= FILTER_LOW_HZ) & (freqs <= FILTER_HIGH_HZ)
+    mask = (freqs >= BPM_SEARCH_LOW_HZ) & (freqs <= BPM_SEARCH_HIGH_HZ)
     if not np.any(mask): return None
     peak_freq = freqs[mask][np.argmax(psd[mask])]
     return peak_freq * 60.0
@@ -157,16 +159,16 @@ def method_CHROM(rgb, fs):
     Xs = 3*rn - 2*gn; Ys = 1.5*rn + gn - 1.5*bn
     # alpha do sinal bruto (como pyVHR cpu_CHROM)
     a = np.std(Xs) / (np.std(Ys) if np.std(Ys)>1e-6 else 1.0)
-    return bandpass(Xs - a*Ys, fs)
+    return bandpass(detrend_norm(Xs - a*Ys), fs)
 
 def method_POS(rgb, fs):
     """Wang et al. (2017) IEEE TBME 64(7):1479."""
     m = np.mean(rgb, axis=0); m = np.where(m==0, 1e-6, m)
     rn, gn, bn = rgb[:,0]/m[0], rgb[:,1]/m[1], rgb[:,2]/m[2]
     S1 = rn - gn; S2 = rn + gn - 2*bn
-    # beta do sinal bruto, bandpass no BVP final
+    # beta do sinal bruto, detrend + bandpass no BVP final
     b = np.std(S1) / (np.std(S2) if np.std(S2)>1e-6 else 1.0)
-    return bandpass(detrend_norm(S1 + b*S2), fs)
+    return bandpass(detrend_norm(S1 + b*S2), fs)  # detrend_norm já presente
 
 def method_ICA(rgb, fs):
     """Poh et al. (2010) Optics Express 18(10):10762."""
