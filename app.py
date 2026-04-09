@@ -19,7 +19,7 @@ from PIL import Image
 import mediapipe as mp
 from mediapipe.tasks import python as mp_tasks_python
 from mediapipe.tasks.python import vision as mp_tasks_vision
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import butter, sosfilt, sosfiltfilt, find_peaks
 from scipy.fft import fft, fftfreq
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
@@ -46,9 +46,9 @@ def new_session(method="CHROM"):
 def bandpass(sig,fs):
     nyq=fs/2.0; lo=max(FILTER_LOW_HZ/nyq,0.001); hi=min(FILTER_HIGH_HZ/nyq,0.999)
     if lo>=hi or len(sig)<15: return sig
-    b,a=butter(FILTER_ORDER,[lo,hi],btype="band")
-    pl=min(len(sig)-1,3*max(len(b),len(a)))
-    return filtfilt(b,a,sig,padlen=pl)
+    # sosfiltfilt é mais estável numericamente que filtfilt para sinais biológicos
+    sos=butter(FILTER_ORDER,[lo,hi],btype="band",output="sos")
+    return sosfiltfilt(sos,sig)
 
 def detrend_norm(s):
     x=np.arange(len(s)); s=s-np.polyval(np.polyfit(x,s,1),x)
@@ -79,15 +79,64 @@ def estimate_bpm(sig,fs):
             bpm=bpm/2.0
     return bpm
 
-def compute_hrv(sig,fs):
-    if len(sig)<fs*5: return None,None
-    peaks,_=find_peaks(sig,distance=max(int(PEAK_MIN_DISTANCE_SEC*fs),1),
-        height=np.median(sig),prominence=np.std(sig)*0.3)
-    if len(peaks)<3: return None,None
-    rr=np.diff(peaks)/fs*1000.0
-    rr=rr[(rr>=PEAK_MIN_DISTANCE_SEC*1000)&(rr<=PEAK_MAX_DISTANCE_SEC*1000)]
-    if len(rr)<2: return None,None
-    return rr.tolist(),float(np.sqrt(np.mean(np.diff(rr)**2)))
+def moving_average(sig, window=5):
+    """Média móvel para suavizar micro-oscilações antes de detectar picos."""
+    if len(sig) < window:
+        return sig
+    kernel = np.ones(window) / window
+    return np.convolve(sig, kernel, mode='same')
+
+def compute_hrv(sig, fs):
+    """
+    Calcula HRV (RMSSD) com:
+    - Suavização por média móvel antes de detectar picos
+    - Filtro de outliers RR por mediana (±20%)
+    - Validação SQI: rejeita se desvio padrão dos RR for absurdo
+    """
+    if len(sig) < fs * 5:
+        return None, None
+
+    # Suavizar sinal para reduzir micro-oscilações da câmera
+    win = max(3, int(fs * 0.1))  # janela de ~100ms
+    sig_smooth = moving_average(sig, window=win)
+
+    min_dist = max(int(PEAK_MIN_DISTANCE_SEC * fs), 1)
+    peaks, _ = find_peaks(
+        sig_smooth,
+        distance=min_dist,
+        height=np.median(sig_smooth),
+        prominence=np.std(sig_smooth) * 0.5,  # limiar mais alto = menos falsos picos
+        wlen=min(len(sig_smooth), int(fs * 2))  # janela local para prominence
+    )
+    if len(peaks) < 3:
+        return None, None
+
+    # Intervalos RR em ms
+    rr = np.diff(peaks) / fs * 1000.0
+
+    # Filtro 1: limites fisiológicos absolutos (40-200 BPM)
+    rr = rr[(rr >= PEAK_MIN_DISTANCE_SEC * 1000) & (rr <= PEAK_MAX_DISTANCE_SEC * 1000)]
+    if len(rr) < 2:
+        return None, None
+
+    # Filtro 2: outliers por mediana — remove RR que variem >20% da mediana
+    median_rr = np.median(rr)
+    rr = rr[np.abs(rr - median_rr) <= median_rr * 0.20]
+    if len(rr) < 2:
+        return None, None
+
+    # SQI — Signal Quality Index: rejeita se desvio padrão dos RR for absurdo
+    # Fisiologicamente, std(RR) raramente passa de 150ms em repouso
+    if np.std(rr) > 150:
+        return None, None
+
+    rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
+
+    # Sanidade final: RMSSD > 300ms é claramente ruído
+    if rmssd > 300:
+        return None, None
+
+    return rr.tolist(), rmssd
 
 def readiness_score(bpm,rmssd):
     if bpm is None or rmssd is None: return None
