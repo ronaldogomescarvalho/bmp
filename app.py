@@ -292,7 +292,7 @@ def process_frame(image_data_b64, session):
 
     return result
 
-# ── Rotas ─────────────────────────────────────────────────────────────────────
+# ── Rotasss─────────────────────────────────────────────────────────────────────
 @app.route("/")
 def index(): return render_template("index.html")
 
